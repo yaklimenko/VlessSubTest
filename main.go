@@ -141,7 +141,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`vlesssubtest — test VLESS subscription keys
+	fmt.Println(`vlesssubtest — test VLESS subscription keys against youtube.com and instagram.com
 
 Usage:
   vlesssubtest url=<subscription_url> [options]

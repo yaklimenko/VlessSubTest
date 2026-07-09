@@ -11,30 +11,30 @@ import (
 	"time"
 )
 
-// TestResult holds the outcome of testing one vless key.
 type TestResult struct {
-	KeyIdx int
-	Key    *VlessKey
-	Remark string
-	IP     string
-	Status string // "OK" or "FAILED"
-	Reason string // e.g. "TIMEOUT", "HTTP_403", platform error
-	Port   int
+	KeyIdx          int
+	Key             *VlessKey
+	Remark          string
+	IP              string
+	Status          string // "OK" if both services OK, else "FAILED"
+	Reason          string
+	YoutubeStatus   string
+	YoutubeReason   string
+	InstagramStatus string
+	InstagramReason string
 }
 
-// portRange defines the range of ports available for socks5.
 const (
 	portRangeStart = 10800
 	portRangeEnd   = 10900
 )
 
 var (
-	portMutex    sync.Mutex
-	usedPorts    = map[int]bool{}
-	portNext     = portRangeStart
+	portMutex sync.Mutex
+	usedPorts = map[int]bool{}
+	portNext  = portRangeStart
 )
 
-// allocatePort finds a free port in the range.
 func allocatePort() (int, error) {
 	portMutex.Lock()
 	defer portMutex.Unlock()
@@ -43,7 +43,6 @@ func allocatePort() (int, error) {
 		if usedPorts[i] {
 			continue
 		}
-		// Check if port is actually available
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", i))
 		if err == nil {
 			ln.Close()
@@ -55,7 +54,6 @@ func allocatePort() (int, error) {
 	return 0, fmt.Errorf("no free ports in range %d-%d", portRangeStart, portRangeEnd)
 }
 
-// releasePort marks a port as available again.
 func releasePort(port int) {
 	portMutex.Lock()
 	defer portMutex.Unlock()
@@ -65,89 +63,7 @@ func releasePort(port int) {
 	}
 }
 
-// TestOneKey tests a single vless key by running sing-box and curling through it.
-func TestOneKey(idx int, key *VlessKey, singBoxPath string, timeoutSec int, verbose bool, keepLogs bool) TestResult {
-	result := TestResult{
-		KeyIdx: idx,
-		Key:    key,
-		Remark: key.Remark,
-		IP:     key.Address,
-		Port:   0,
-		Status: "FAILED",
-	}
-
-	// Allocate port
-	port, err := allocatePort()
-	if err != nil {
-		result.Reason = fmt.Sprintf("NO_PORT: %v", err)
-		return result
-	}
-	result.Port = port
-	defer releasePort(port)
-
-	// Generate and write config
-	cfg, err := GenerateConfig(key, port)
-	if err != nil {
-		result.Reason = fmt.Sprintf("CONFIG_ERROR: %v", err)
-		return result
-	}
-
-	configPath, err := WriteConfig(cfg)
-	if err != nil {
-		result.Reason = fmt.Sprintf("CONFIG_WRITE_ERROR: %v", err)
-		return result
-	}
-
-	// Create data directory
-	dataDir := fmt.Sprintf("/tmp/vlesssub/data-%d", port)
-	os.MkdirAll(dataDir, 0755)
-
-	// Cleanup function
-	cleanup := func() {
-		if !keepLogs {
-			os.Remove(configPath)
-			os.RemoveAll(dataDir)
-			logFile := fmt.Sprintf("/tmp/vlesssub/sing-box-%d.log", port)
-			os.Remove(logFile)
-		}
-	}
-	defer cleanup()
-
-	// Start sing-box
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec+5)*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, singBoxPath, "run",
-		"-c", configPath,
-		"-D", dataDir,
-	)
-
-	if verbose {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-
-	if err := cmd.Start(); err != nil {
-		result.Reason = fmt.Sprintf("SING_BOX_START_FAILED: %v", err)
-		return result
-	}
-
-	// Ensure sing-box is killed on exit
-	defer func() {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		// Wait a bit for cleanup
-		time.Sleep(200 * time.Millisecond)
-	}()
-
-	// Wait for socks5 port to be ready
-	if !waitForPort(port, timeoutSec) {
-		result.Reason = "SING_BOX_START_FAILED: port not ready"
-		return result
-	}
-
-	// Run curl test
+func runCurl(port int, targetURL string, timeoutSec int, parentCtx context.Context) (status, reason string) {
 	curlCtx, curlCancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer curlCancel()
 
@@ -158,7 +74,7 @@ func TestOneKey(idx int, key *VlessKey, singBoxPath string, timeoutSec int, verb
 		"-w", "%{http_code}",
 		"--connect-timeout", fmt.Sprintf("%d", timeoutSec/2+2),
 		"--max-time", fmt.Sprintf("%d", timeoutSec),
-		"https://youtube.com",
+		targetURL,
 	)
 
 	output, err := curlCmd.Output()
@@ -174,60 +90,151 @@ func TestOneKey(idx int, key *VlessKey, singBoxPath string, timeoutSec int, verb
 	if err != nil && exitCode != 0 {
 		httpCode := strings.TrimSpace(string(output))
 		if httpCode != "" {
-			// We got an HTTP response but curl had some issue
 			code := strings.TrimSpace(httpCode)
-			// If time exceeded -> TIMEOUT
-			if ctx.Err() != nil || curlCtx.Err() != nil {
-				result.Reason = "TIMEOUT"
+			if parentCtx.Err() != nil || curlCtx.Err() != nil {
+				return "FAILED", "TIMEOUT"
 			} else if code == "000" {
-				result.Reason = "CONNECTION_FAILED"
+				return "FAILED", "CONNECTION_FAILED"
 			} else {
-				result.Reason = fmt.Sprintf("CURL_EXIT_%d", exitCode)
+				return "FAILED", fmt.Sprintf("CURL_EXIT_%d", exitCode)
 			}
-			return result
 		}
-		// Curl error
 		if exitErr != nil {
 			errStr := err.Error()
 			switch {
 			case strings.Contains(errStr, "timed out") || strings.Contains(errStr, "timeout"):
-				result.Reason = "TIMEOUT"
+				return "FAILED", "TIMEOUT"
 			case strings.Contains(errStr, "refused") || strings.Contains(errStr, "reset") || strings.Contains(errStr, "Could not resolve"):
-				result.Reason = "CONNECTION_FAILED"
+				return "FAILED", "CONNECTION_FAILED"
 			default:
-				result.Reason = fmt.Sprintf("CURL_EXIT_%d", exitCode)
+				return "FAILED", fmt.Sprintf("CURL_EXIT_%d", exitCode)
 			}
-			return result
 		}
 	}
 
 	httpCode := strings.TrimSpace(string(output))
 
 	if httpCode == "" || httpCode == "000" {
-		result.Reason = "CONNECTION_FAILED"
-		return result
+		return "FAILED", "CONNECTION_FAILED"
 	}
 
-	// Check HTTP status
 	switch {
 	case httpCode == "200":
-		result.Status = "OK"
-		result.Reason = ""
+		return "OK", ""
 	case httpCode == "301" || httpCode == "302" || httpCode == "307" || httpCode == "308":
-		// Redirect is OK - YouTube might redirect
-		result.Status = "OK"
-		result.Reason = ""
+		return "OK", ""
 	case httpCode[0] == '2':
+		return "OK", ""
+	default:
+		return "FAILED", fmt.Sprintf("HTTP_%s", httpCode)
+	}
+}
+
+func curlTargetURL(key *VlessKey, singBoxPath string, targetURL string, timeoutSec int, verbose bool, keepLogs bool) (status, reason string) {
+	port, err := allocatePort()
+	if err != nil {
+		return "FAILED", fmt.Sprintf("NO_PORT: %v", err)
+	}
+	defer releasePort(port)
+
+	cfg, err := GenerateConfig(key, port)
+	if err != nil {
+		return "FAILED", fmt.Sprintf("CONFIG_ERROR: %v", err)
+	}
+
+	configPath, err := WriteConfig(cfg)
+	if err != nil {
+		return "FAILED", fmt.Sprintf("CONFIG_WRITE_ERROR: %v", err)
+	}
+
+	dataDir := fmt.Sprintf("/tmp/vlesssub/data-%d", port)
+	os.MkdirAll(dataDir, 0755)
+
+	cleanup := func() {
+		if !keepLogs {
+			os.Remove(configPath)
+			os.RemoveAll(dataDir)
+			logFile := fmt.Sprintf("/tmp/vlesssub/sing-box-%d.log", port)
+			os.Remove(logFile)
+		}
+	}
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec+5)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, singBoxPath, "run",
+		"-c", configPath,
+		"-D", dataDir,
+	)
+
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	if err := cmd.Start(); err != nil {
+		return "FAILED", fmt.Sprintf("SING_BOX_START_FAILED: %v", err)
+	}
+
+	defer func() {
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		time.Sleep(200 * time.Millisecond)
+	}()
+
+	if !waitForPort(port, timeoutSec) {
+		return "FAILED", "SING_BOX_START_FAILED: port not ready"
+	}
+
+	return runCurl(port, targetURL, timeoutSec, ctx)
+}
+
+func TestOneKey(idx int, key *VlessKey, singBoxPath string, timeoutSec int, verbose bool, keepLogs bool) TestResult {
+	result := TestResult{
+		KeyIdx:          idx,
+		Key:             key,
+		Remark:          key.Remark,
+		IP:              key.Address,
+		Status:          "FAILED",
+		YoutubeStatus:   "FAILED",
+		InstagramStatus: "FAILED",
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		result.YoutubeStatus, result.YoutubeReason = curlTargetURL(key, singBoxPath, "https://youtube.com", timeoutSec, verbose, keepLogs)
+	}()
+
+	go func() {
+		defer wg.Done()
+		result.InstagramStatus, result.InstagramReason = curlTargetURL(key, singBoxPath, "https://instagram.com", timeoutSec, verbose, keepLogs)
+	}()
+
+	wg.Wait()
+
+	if result.YoutubeStatus == "OK" && result.InstagramStatus == "OK" {
 		result.Status = "OK"
 		result.Reason = ""
-	default:
-		result.Reason = fmt.Sprintf("HTTP_%s", httpCode)
+	} else {
+		result.Status = "FAILED"
+		var parts []string
+		if result.YoutubeStatus != "OK" {
+			parts = append(parts, fmt.Sprintf("youtube: %s", result.YoutubeReason))
+		}
+		if result.InstagramStatus != "OK" {
+			parts = append(parts, fmt.Sprintf("instagram: %s", result.InstagramReason))
+		}
+		result.Reason = strings.Join(parts, "; ")
 	}
 
 	return result
 }
 
-// waitForPort polls until the given port is accepting connections.
 func waitForPort(port int, timeoutSec int) bool {
 	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -243,9 +250,7 @@ func waitForPort(port int, timeoutSec int) bool {
 	return false
 }
 
-// RunTests orchestrates parallel testing of all keys.
 func RunTests(keys []*VlessKey, singBoxPath string, timeoutSec int, maxParallel int, verbose bool, keepLogs bool) []TestResult {
-	// Ensure temp dir exists
 	os.MkdirAll("/tmp/vlesssub", 0755)
 
 	if maxParallel <= 0 || maxParallel > len(keys) {
