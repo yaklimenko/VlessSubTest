@@ -149,6 +149,53 @@ func startServer(singBoxPath string, timeoutSec, maxParallel int, verbose, keepL
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	mux.HandleFunc("/test-single", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Vless   string `json:"vless"`
+			Timeout int    `json:"timeout"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+
+		if req.Vless == "" {
+			http.Error(w, `{"error":"vless is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		if req.Timeout <= 0 {
+			req.Timeout = timeoutSec
+		}
+
+		key, err := ParseVlessURI(req.Vless)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("parse error: %v", err)})
+			return
+		}
+
+		result := TestOneKey(0, key, singBoxPath, req.Timeout, verbose, keepLogs)
+
+		resp := TestResultItem{
+			KeyIdx:    0,
+			IP:        result.IP,
+			Remark:    result.Remark,
+			Status:    result.Status,
+			Reason:    result.Reason,
+			Youtube:   result.YoutubeDisplay(),
+			Instagram: result.InstagramDisplay(),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Fprintf(os.Stderr, "VlessSubTest server listening on %s\n", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
