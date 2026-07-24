@@ -12,16 +12,38 @@ import (
 )
 
 type TestResult struct {
-	KeyIdx          int
-	Key             *VlessKey
-	Remark          string
-	IP              string
-	Status          string // "OK" if both services OK, else "FAILED"
-	Reason          string
-	YoutubeStatus   string
-	YoutubeReason   string
-	InstagramStatus string
-	InstagramReason string
+	KeyIdx          int       `json:"key_idx"`
+	Key             *VlessKey `json:"-"`
+	Remark          string    `json:"remark"`
+	IP              string    `json:"ip"`
+	Status          string    `json:"status"`
+	Reason          string    `json:"reason,omitempty"`
+	YoutubeStatus   string    `json:"-"`
+	YoutubeReason   string    `json:"-"`
+	InstagramStatus string    `json:"-"`
+	InstagramReason string    `json:"-"`
+}
+
+func (r TestResult) YoutubeDisplay() string {
+	if r.YoutubeStatus == "FAILED" {
+		reason := r.YoutubeReason
+		if reason == "" {
+			reason = "UNKNOWN"
+		}
+		return fmt.Sprintf("FAILED (%s)", reason)
+	}
+	return r.YoutubeStatus
+}
+
+func (r TestResult) InstagramDisplay() string {
+	if r.InstagramStatus == "FAILED" {
+		reason := r.InstagramReason
+		if reason == "" {
+			reason = "UNKNOWN"
+		}
+		return fmt.Sprintf("FAILED (%s)", reason)
+	}
+	return r.InstagramStatus
 }
 
 const (

@@ -23,24 +23,8 @@ func PrintResults(results []TestResult) {
 		case r.Key == nil:
 			fmt.Printf("keyIdx: %d | FAILED to parse\n", r.KeyIdx)
 		default:
-			ytStr := r.YoutubeStatus
-			if r.YoutubeStatus == "FAILED" {
-				reason := r.YoutubeReason
-				if reason == "" {
-					reason = "UNKNOWN"
-				}
-				ytStr = fmt.Sprintf("FAILED (%s)", reason)
-			}
-			igStr := r.InstagramStatus
-			if r.InstagramStatus == "FAILED" {
-				reason := r.InstagramReason
-				if reason == "" {
-					reason = "UNKNOWN"
-				}
-				igStr = fmt.Sprintf("FAILED (%s)", reason)
-			}
 			fmt.Printf("keyIdx: %d | %s | %s | youtube: %s; instagram: %s\n",
-				r.KeyIdx, r.IP, r.Remark, ytStr, igStr)
+				r.KeyIdx, r.IP, r.Remark, r.YoutubeDisplay(), r.InstagramDisplay())
 		}
 	}
 }

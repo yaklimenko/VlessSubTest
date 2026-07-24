@@ -9,21 +9,18 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
-	}
-
 	var url string
 	timeoutSec := 10
-	maxParallel := 0 // 0 = all
+	maxParallel := 0
 	verbose := false
 	keepLogs := false
+	serverPort := 8080
+	hasURL := false
 
-	// Parse args
 	for _, arg := range os.Args[1:] {
 		if strings.HasPrefix(arg, "url=") {
 			url = strings.TrimPrefix(arg, "url=")
+			hasURL = true
 		} else if arg == "--help" || arg == "-h" {
 			printUsage()
 			os.Exit(0)
@@ -41,6 +38,11 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error: invalid --parallel value\n")
 				os.Exit(1)
 			}
+		} else if strings.HasPrefix(arg, "--port=") {
+			if _, err := fmt.Sscanf(strings.TrimPrefix(arg, "--port="), "%d", &serverPort); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --port value\n")
+				os.Exit(1)
+			}
 		} else if strings.HasPrefix(arg, "--") {
 			fmt.Fprintf(os.Stderr, "Error: unknown option: %s\n", arg)
 			os.Exit(1)
@@ -50,12 +52,16 @@ func main() {
 		}
 	}
 
-	if url == "" {
-		fmt.Fprintf(os.Stderr, "Error: url= is required\n")
-		os.Exit(1)
-	}
+	singBoxPath := findSingBox()
 
-	// Find sing-box binary
+	if hasURL {
+		runCLI(url, singBoxPath, timeoutSec, maxParallel, verbose, keepLogs)
+	} else {
+		startServer(singBoxPath, timeoutSec, maxParallel, verbose, keepLogs, serverPort)
+	}
+}
+
+func findSingBox() string {
 	execDir, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot determine executable path: %v\n", err)
@@ -65,15 +71,21 @@ func main() {
 
 	singBoxPath := filepath.Join(execDir, "sing-box")
 	if _, err := os.Stat(singBoxPath); os.IsNotExist(err) {
-		// Try current directory
 		singBoxPath = "sing-box"
 		if _, err := os.Stat(singBoxPath); os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "Error: sing-box binary not found. Place it next to vlesssubtest or in PATH.\n")
 			os.Exit(1)
 		}
 	}
+	return singBoxPath
+}
 
-	// Fetch subscription
+func runCLI(url, singBoxPath string, timeoutSec, maxParallel int, verbose, keepLogs bool) {
+	if url == "" {
+		fmt.Fprintf(os.Stderr, "Error: url= is required\n")
+		os.Exit(1)
+	}
+
 	fmt.Fprintf(os.Stderr, "Fetching subscription from %s ...\n", url)
 	subscriptionLines, err := FetchSubscription(url)
 	if err != nil {
@@ -86,9 +98,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parse vless keys
 	var keys []*VlessKey
-	var preResults []TestResult // for keys that fail to parse at this stage
+	var preResults []TestResult
 
 	for i, line := range subscriptionLines {
 		line = strings.TrimSpace(line)
@@ -114,15 +125,12 @@ func main() {
 
 	fmt.Fprintf(os.Stderr, "Found %d vless keys, testing...\n", len(keys))
 
-	// Run tests
 	results := RunTests(keys, singBoxPath, timeoutSec, maxParallel, verbose, keepLogs)
 
-	// Merge pre-results (parse failures)
 	finalResults := make([]TestResult, 0, len(results)+len(preResults))
 	keyIdx := 0
 	preIdx := 0
 
-	// Reconstruct order: walk original lines, match to results or preResults
 	for i, line := range subscriptionLines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -144,19 +152,25 @@ func printUsage() {
 	fmt.Println(`vlesssubtest — test VLESS subscription keys against youtube.com and instagram.com
 
 Usage:
-  vlesssubtest url=<subscription_url> [options]
+  vlesssubtest url=<subscription_url> [options]     CLI mode: test and exit
+  vlesssubtest [--port=N] [options]                 Server mode: HTTP API
 
 Options:
-  url=<url>          Subscription URL (required)
+  url=<url>          Subscription URL (required in CLI mode)
   --timeout=N        Test timeout in seconds (default: 10)
   --parallel=N       Max parallel tests (default: all)
+  --port=N           HTTP server port (default: 8080)
   --verbose          Show sing-box logs on error
   --keep-logs        Keep temporary files in /tmp/vlesssub
   --help, -h         Show this help
 
-Example:
+CLI mode:
   vlesssubtest url=https://example.com/sub/ExampleClient
-  vlesssubtest url=https://example.com/sub --timeout=15 --parallel=5`)
+  vlesssubtest url=https://example.com/sub --timeout=15 --parallel=5
+
+Server mode:
+  vlesssubtest --port=8080
+  curl -X POST http://localhost:8080/test -H 'Content-Type: application/json' -d '{"url":"https://example.com/sub"}'`)
 }
 
 // decodeBase64Subscription decodes a base64-encoded subscription into lines.
