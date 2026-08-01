@@ -26,6 +26,8 @@ type VlessKey struct {
 	Path           string // ws path, grpc serviceName
 	ServiceName    string // grpc serviceName (vless link param "serviceName")
 	Mode           string // xhttp mode (auto/packet-up/stream-up)
+	Extra          string // xhttp extra JSON (headers, xPadding*)
+	XPaddingBytes  string // xhttp x_padding_bytes param
 	Host           string // ws/grpc host
 	Encryption     string // "none"
 	PacketEncoding string // "xudp", "packetaddr"
@@ -119,6 +121,8 @@ func ParseVlessURI(raw string) (*VlessKey, error) {
 		Path:           getQuery(query, "path", ""),
 		ServiceName:    getQuery(query, "serviceName", getQuery(query, "service_name", "")),
 		Mode:           getQuery(query, "mode", ""),
+		Extra:          getQuery(query, "extra", ""),
+		XPaddingBytes:  getQuery(query, "x_padding_bytes", ""),
 		Host:           getQuery(query, "host", ""),
 		Encryption:     getQuery(query, "encryption", "none"),
 		PacketEncoding: getQuery(query, "packet_encoding", ""),

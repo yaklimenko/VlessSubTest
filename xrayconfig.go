@@ -56,9 +56,18 @@ type XrayStreamSettings struct {
 }
 
 type XrayXHTTPSettings struct {
-	Path string `json:"path,omitempty"`
-	Host string `json:"host,omitempty"`
-	Mode string `json:"mode,omitempty"`
+	Path string           `json:"path,omitempty"`
+	Host string           `json:"host,omitempty"`
+	Mode string           `json:"mode,omitempty"`
+	Extra *XrayXHTTPExtra `json:"extra,omitempty"`
+}
+
+type XrayXHTTPExtra struct {
+	Headers          map[string]string `json:"headers,omitempty"`
+	XPaddingBytes    string            `json:"xPaddingBytes,omitempty"`
+	XPaddingHeader   string            `json:"xPaddingHeader,omitempty"`
+	XPaddingKey      string            `json:"xPaddingKey,omitempty"`
+	XPaddingObfsMode bool              `json:"xPaddingObfsMode,omitempty"`
 }
 
 type XrayRealitySettings struct {
@@ -126,9 +135,12 @@ func GenerateXrayConfig(key *VlessKey, port int) (*XrayConfig, error) {
 	switch key.Type {
 	case "xhttp":
 		stream.XHTTPSettings = &XrayXHTTPSettings{
-			Path: firstNonEmpty(key.SpiderX, key.Path, "/"),
-			Host: firstNonEmpty(key.Host, key.ServerName),
-			Mode: firstNonEmpty(key.Mode, "auto"),
+			// path and spx are separate params: path goes to xhttpSettings,
+			// spx goes to realitySettings.spiderX. Do NOT use spx as path.
+			Path:  firstNonEmpty(key.Path, "/"),
+			Host:  key.Host, // do NOT fall back to sni — server may expect empty host
+			Mode:  firstNonEmpty(key.Mode, "auto"),
+			Extra: buildXHTTPExtra(key),
 		}
 	case "ws":
 		stream.WSSettings = &XrayWSSettings{
@@ -213,6 +225,43 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// buildXHTTPExtra parses the "extra" JSON param from a vless link (headers,
+// xPadding anti-DPI settings) plus the standalone x_padding_bytes param.
+func buildXHTTPExtra(key *VlessKey) *XrayXHTTPExtra {
+	if key.Extra == "" && key.XPaddingBytes == "" {
+		return nil
+	}
+
+	extra := &XrayXHTTPExtra{}
+	if key.Extra != "" {
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(key.Extra), &m); err == nil {
+			if h, ok := m["headers"].(map[string]interface{}); ok {
+				hm := make(map[string]string, len(h))
+				for k, v := range h {
+					hm[k] = fmt.Sprintf("%v", v)
+				}
+				extra.Headers = hm
+			}
+			extra.XPaddingBytes = stringVal(m["xPaddingBytes"])
+			extra.XPaddingHeader = stringVal(m["xPaddingHeader"])
+			extra.XPaddingKey = stringVal(m["xPaddingKey"])
+			if b, ok := m["xPaddingObfsMode"].(bool); ok {
+				extra.XPaddingObfsMode = b
+			}
+		}
+	}
+	if extra.XPaddingBytes == "" {
+		extra.XPaddingBytes = key.XPaddingBytes
+	}
+	return extra
+}
+
+func stringVal(v interface{}) string {
+	s, _ := v.(string)
+	return s
 }
 
 // xrayHostNormalize: xray xhttpSettings.host is a string, not a list.
