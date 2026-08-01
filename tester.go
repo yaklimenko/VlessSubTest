@@ -152,25 +152,46 @@ func runCurl(port int, targetURL string, timeoutSec int, parentCtx context.Conte
 	}
 }
 
-func curlTargetURL(key *VlessKey, singBoxPath string, targetURL string, timeoutSec int, verbose bool, keepLogs bool) (status, reason string) {
+func curlTargetURL(key *VlessKey, singBoxPath, xrayPath string, targetURL string, timeoutSec int, verbose bool, keepLogs bool) (status, reason string) {
 	port, err := allocatePort()
 	if err != nil {
 		return "FAILED", fmt.Sprintf("NO_PORT: %v", err)
 	}
 	defer releasePort(port)
 
-	cfg, err := GenerateConfig(key, port)
-	if err != nil {
-		return "FAILED", fmt.Sprintf("CONFIG_ERROR: %v", err)
+	// Xray-core is used for transports sing-box does not support natively (xhttp).
+	useXray := key.Type == "xhttp"
+	enginePath := singBoxPath
+	if useXray {
+		if xrayPath == "" {
+			return "FAILED", "XRAY_NOT_FOUND: xray binary required for xhttp keys"
+		}
+		enginePath = xrayPath
 	}
 
-	configPath, err := WriteConfig(cfg)
-	if err != nil {
-		return "FAILED", fmt.Sprintf("CONFIG_WRITE_ERROR: %v", err)
+	var configPath string
+	var dataDir string
+	if useXray {
+		cfg, err := GenerateXrayConfig(key, port)
+		if err != nil {
+			return "FAILED", fmt.Sprintf("CONFIG_ERROR: %v", err)
+		}
+		configPath, err = WriteXrayConfig(cfg)
+		if err != nil {
+			return "FAILED", fmt.Sprintf("CONFIG_WRITE_ERROR: %v", err)
+		}
+	} else {
+		cfg, err := GenerateConfig(key, port)
+		if err != nil {
+			return "FAILED", fmt.Sprintf("CONFIG_ERROR: %v", err)
+		}
+		configPath, err = WriteConfig(cfg)
+		if err != nil {
+			return "FAILED", fmt.Sprintf("CONFIG_WRITE_ERROR: %v", err)
+		}
+		dataDir = fmt.Sprintf("/tmp/vlesssub/data-%d", port)
+		os.MkdirAll(dataDir, 0755)
 	}
-
-	dataDir := fmt.Sprintf("/tmp/vlesssub/data-%d", port)
-	os.MkdirAll(dataDir, 0755)
 
 	cleanup := func() {
 		if !keepLogs {
@@ -185,10 +206,14 @@ func curlTargetURL(key *VlessKey, singBoxPath string, targetURL string, timeoutS
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec+5)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, singBoxPath, "run",
-		"-c", configPath,
-		"-D", dataDir,
-	)
+	var args []string
+	if useXray {
+		args = []string{"run", "-c", configPath}
+	} else {
+		args = []string{"run", "-c", configPath, "-D", dataDir}
+	}
+
+	cmd := exec.CommandContext(ctx, enginePath, args...)
 
 	if verbose {
 		cmd.Stdout = os.Stdout
@@ -213,7 +238,7 @@ func curlTargetURL(key *VlessKey, singBoxPath string, targetURL string, timeoutS
 	return runCurl(port, targetURL, timeoutSec, ctx)
 }
 
-func TestOneKey(idx int, key *VlessKey, singBoxPath string, timeoutSec int, verbose bool, keepLogs bool) TestResult {
+func TestOneKey(idx int, key *VlessKey, singBoxPath, xrayPath string, timeoutSec int, verbose bool, keepLogs bool) TestResult {
 	result := TestResult{
 		KeyIdx:          idx,
 		Key:             key,
@@ -229,12 +254,12 @@ func TestOneKey(idx int, key *VlessKey, singBoxPath string, timeoutSec int, verb
 
 	go func() {
 		defer wg.Done()
-		result.YoutubeStatus, result.YoutubeReason = curlTargetURL(key, singBoxPath, "https://youtube.com", timeoutSec, verbose, keepLogs)
+		result.YoutubeStatus, result.YoutubeReason = curlTargetURL(key, singBoxPath, xrayPath, "https://youtube.com", timeoutSec, verbose, keepLogs)
 	}()
 
 	go func() {
 		defer wg.Done()
-		result.InstagramStatus, result.InstagramReason = curlTargetURL(key, singBoxPath, "https://instagram.com", timeoutSec, verbose, keepLogs)
+		result.InstagramStatus, result.InstagramReason = curlTargetURL(key, singBoxPath, xrayPath, "https://instagram.com", timeoutSec, verbose, keepLogs)
 	}()
 
 	wg.Wait()
@@ -272,7 +297,7 @@ func waitForPort(port int, timeoutSec int) bool {
 	return false
 }
 
-func RunTests(keys []*VlessKey, singBoxPath string, timeoutSec int, maxParallel int, verbose bool, keepLogs bool) []TestResult {
+func RunTests(keys []*VlessKey, singBoxPath, xrayPath string, timeoutSec int, maxParallel int, verbose bool, keepLogs bool) []TestResult {
 	os.MkdirAll("/tmp/vlesssub", 0755)
 
 	if maxParallel <= 0 || maxParallel > len(keys) {
@@ -290,7 +315,7 @@ func RunTests(keys []*VlessKey, singBoxPath string, timeoutSec int, maxParallel 
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			result := TestOneKey(idx, k, singBoxPath, timeoutSec, verbose, keepLogs)
+			result := TestOneKey(idx, k, singBoxPath, xrayPath, timeoutSec, verbose, keepLogs)
 			results[idx] = result
 		}(i, key)
 	}

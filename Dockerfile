@@ -3,6 +3,14 @@ WORKDIR /app
 COPY go.mod *.go ./
 RUN go build -o vlesssubtest .
 
+# Download Xray-core binary (used for xhttp transport tests)
+RUN apt-get update && apt-get install -y --no-install-recommends unzip wget ca-certificates && \
+    wget -q "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip" -O /tmp/xray.zip && \
+    unzip -o /tmp/xray.zip -d /tmp/xray && \
+    mv /tmp/xray/xray /tmp/xray-bin && \
+    chmod +x /tmp/xray-bin && \
+    rm -rf /tmp/xray.zip /tmp/xray
+
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
@@ -12,6 +20,7 @@ RUN wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_
     mv /tmp/sing-box-*/sing-box /usr/local/bin/ && \
     rm -rf /tmp/sb.tar.gz /tmp/sing-box-* && \
     chmod +x /usr/local/bin/sing-box
+COPY --from=builder /tmp/xray-bin /usr/local/bin/xray
 COPY --from=builder /app/vlesssubtest /usr/local/bin/
 EXPOSE 8080
 ENTRYPOINT ["vlesssubtest"]

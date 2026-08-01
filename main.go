@@ -53,11 +53,12 @@ func main() {
 	}
 
 	singBoxPath := findSingBox()
+	xrayPath := findXray()
 
 	if hasURL {
-		runCLI(url, singBoxPath, timeoutSec, maxParallel, verbose, keepLogs)
+		runCLI(url, singBoxPath, xrayPath, timeoutSec, maxParallel, verbose, keepLogs)
 	} else {
-		startServer(singBoxPath, timeoutSec, maxParallel, verbose, keepLogs, serverPort)
+		startServer(singBoxPath, xrayPath, timeoutSec, maxParallel, verbose, keepLogs, serverPort)
 	}
 }
 
@@ -80,7 +81,24 @@ func findSingBox() string {
 	return singBoxPath
 }
 
-func runCLI(url, singBoxPath string, timeoutSec, maxParallel int, verbose, keepLogs bool) {
+func findXray() string {
+	execDir, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	execDir = filepath.Dir(execDir)
+
+	xrayPath := filepath.Join(execDir, "xray")
+	if _, err := os.Stat(xrayPath); os.IsNotExist(err) {
+		if _, err := os.Stat("xray"); os.IsNotExist(err) {
+			return "" // xray optional: used only for xhttp keys
+		}
+		xrayPath = "xray"
+	}
+	return xrayPath
+}
+
+func runCLI(url, singBoxPath, xrayPath string, timeoutSec, maxParallel int, verbose, keepLogs bool) {
 	if url == "" {
 		fmt.Fprintf(os.Stderr, "Error: url= is required\n")
 		os.Exit(1)
@@ -125,7 +143,7 @@ func runCLI(url, singBoxPath string, timeoutSec, maxParallel int, verbose, keepL
 
 	fmt.Fprintf(os.Stderr, "Found %d vless keys, testing...\n", len(keys))
 
-	results := RunTests(keys, singBoxPath, timeoutSec, maxParallel, verbose, keepLogs)
+	results := RunTests(keys, singBoxPath, xrayPath, timeoutSec, maxParallel, verbose, keepLogs)
 
 	finalResults := make([]TestResult, 0, len(results)+len(preResults))
 	keyIdx := 0

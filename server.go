@@ -30,7 +30,7 @@ type TestResponse struct {
 	Results []TestResultItem `json:"results"`
 }
 
-func startServer(singBoxPath string, timeoutSec, maxParallel int, verbose, keepLogs bool, port int) {
+func startServer(singBoxPath, xrayPath string, timeoutSec, maxParallel int, verbose, keepLogs bool, port int) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -99,7 +99,7 @@ func startServer(singBoxPath string, timeoutSec, maxParallel int, verbose, keepL
 
 		fmt.Fprintf(os.Stderr, "Found %d vless keys, testing...\n", len(keys))
 
-		results := RunTests(keys, singBoxPath, req.Timeout, req.Parallel, verbose, keepLogs)
+		results := RunTests(keys, singBoxPath, xrayPath, req.Timeout, req.Parallel, verbose, keepLogs)
 
 		finalResults := make([]TestResult, 0, len(results)+len(preResults))
 		keyIdx := 0
@@ -180,7 +180,7 @@ func startServer(singBoxPath string, timeoutSec, maxParallel int, verbose, keepL
 			return
 		}
 
-		result := TestOneKey(0, key, singBoxPath, req.Timeout, verbose, keepLogs)
+		result := TestOneKey(0, key, singBoxPath, xrayPath, req.Timeout, verbose, keepLogs)
 
 		resp := TestResultItem{
 			KeyIdx:    0,
