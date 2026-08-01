@@ -24,6 +24,7 @@ type VlessKey struct {
 	Fingerprint    string // fp
 	ServerName     string // sni
 	Path           string // ws path, grpc serviceName
+	ServiceName    string // grpc serviceName (vless link param "serviceName")
 	Host           string // ws/grpc host
 	Encryption     string // "none"
 	PacketEncoding string // "xudp", "packetaddr"
@@ -115,6 +116,7 @@ func ParseVlessURI(raw string) (*VlessKey, error) {
 		Fingerprint:    getQuery(query, "fp", getQuery(query, "fingerprint", "")),
 		ServerName:     getQuery(query, "sni", getQuery(query, "serverName", "")),
 		Path:           getQuery(query, "path", ""),
+		ServiceName:    getQuery(query, "serviceName", getQuery(query, "service_name", "")),
 		Host:           getQuery(query, "host", ""),
 		Encryption:     getQuery(query, "encryption", "none"),
 		PacketEncoding: getQuery(query, "packet_encoding", ""),

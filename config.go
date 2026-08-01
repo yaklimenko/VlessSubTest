@@ -114,11 +114,8 @@ func GenerateConfig(key *VlessKey, port int) (*SingBoxConfig, error) {
 	}
 	outbound.Port = portNum
 
-	// Network (transport type)
-	outbound.Network = key.Type
-	if outbound.Network == "" {
-		outbound.Network = "tcp"
-	}
+	// Network: sing-box accepts only tcp/udp here (transport type goes to Transport below)
+	outbound.Network = "tcp"
 
 	// Packet encoding
 	if key.PacketEncoding != "" {
@@ -157,28 +154,42 @@ func GenerateConfig(key *VlessKey, port int) (*SingBoxConfig, error) {
 		}
 	}
 
-	// Transport for non-tcp
+	// Transport for non-tcp. NOTE: sing-box has no "xhttp" transport type —
+	// XHTTP/split-http is the "http" transport (host/path/headers).
 	if key.Type != "tcp" && key.Type != "" {
-		transport := &TransportConfig{
-			Type: key.Type,
+		transportType := key.Type
+		if transportType == "xhttp" {
+			transportType = "http"
 		}
-		if key.Path != "" {
-			if key.Type == "grpc" {
+		transport := &TransportConfig{
+			Type: transportType,
+		}
+		if key.Type == "grpc" {
+			if key.ServiceName != "" {
+				transport.ServiceName = key.ServiceName
+			} else if key.Path != "" {
 				transport.ServiceName = key.Path
-			} else {
-				transport.Path = key.Path
 			}
+		} else if key.Path != "" {
+			transport.Path = key.Path
+		} else if key.Type == "xhttp" && key.SpiderX != "" {
+			transport.Path = key.SpiderX
 		}
 		if key.Host != "" {
 			transport.Host = key.Host
 			transport.Headers = map[string][]string{
 				"Host": {key.Host},
 			}
+		} else if key.Type == "xhttp" && key.ServerName != "" {
+			transport.Host = key.ServerName
+			transport.Headers = map[string][]string{
+				"Host": {key.ServerName},
+			}
 		}
 		outbound.Transport = transport
 	}
 
-	// Multiplex for stream-based transports
+	// Multiplex for stream-based transports (xhttp/split-http multiplexes itself)
 	if key.Type == "grpc" || key.Type == "httpupgrade" || key.Type == "h2" {
 		outbound.Multiplex = &MultiplexConfig{
 			Enabled:  true,
