@@ -33,10 +33,12 @@ curl -X POST http://localhost:7070/probe -H 'Content-Type: application/json' \
 cd /home/klem/VlessSubTest && docker build -t vlesssubtest:latest .
 
 # пересоздать прод-контейнер (ТОЛЬКО по явному запросу владельца)
-docker stop vlesssubtest && docker rm vlesssubtest
-docker run -d --name vlesssubtest -p 7070:7070 --network vlesspanel-net \
-  --restart unless-stopped vlesssubtest:latest --port=7070
+cd /home/klem/VlessPanelWebApp && docker compose up -d vlesssubtest
 ```
+
+> Демон и панель описаны в одном compose-стеке: `/home/klem/VlessPanelWebApp/docker-compose.yml`
+> (сервисы `vlesspanel` + `vlesssubtest`, сеть `vlesspanel-net`). Поэтому после пересборки образа
+> (`docker build -t vlesssubtest:latest .`) контейнер пересоздаётся через `docker compose up -d` из папки панели.
 
 ## Логи
 
@@ -47,7 +49,7 @@ docker run -d --name vlesssubtest -p 7070:7070 --network vlesspanel-net \
 
 - **Единицы в `/probe` — килобиты/с (Кбит/с), НЕ килобайты.** Двоичные килобиты (1 Кбит = 1024 бита = 128 байт): `target_kbps=4000` = кап `--limit-rate 512000` (curl считает байты) = 500 КБ/с; `avg_speed_kbps` в тех же единицах (`bytes/s / 128`). Сознательное решение владельца — не менять.
 - **Не трогать прод без явного запроса:** не пересобирать образ, не пересоздавать контейнер `vlesssubtest`, не коммитить в git. Документация/код — пожалуйста, деплой — только по команде.
-- **docker compose НЕ используется** (плагина нет на хосте) — только `docker run`.
+- **docker compose v2 — основной инструмент** (плагин `~/.docker/cli-plugins/docker-compose`, v5.4.0). Старый v1 (`docker-compose` с дефисом) удалён с машины — не использовать. Стек панели: `cd /home/klem/VlessPanelWebApp && docker compose up -d`.
 - Прод-панели 3X-UI управляются только через VlessPanelWebApp (`http://localhost:9090/api/panels`) — напрямую не трогать.
 - Локально порт `8080` занят filebrowser'ом — тестировать на `8081+`.
 - Бинари `sing-box`/`xray` должны лежать рядом с бинарём vlesssubtest (не в PATH). В репо они есть; если нет — `docker cp vlesssubtest:/usr/local/bin/sing-box .` (и `xray`).
