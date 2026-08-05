@@ -101,25 +101,8 @@ type ProbeResponse struct {
 	Results  []ProbeKeyResult `json:"results"`
 }
 
-// handleProbe serves POST /probe.
-func handleProbe(w http.ResponseWriter, r *http.Request, singBoxPath, xrayPath string, verbose, keepLogs bool) {
-	if r.Method != http.MethodPost {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req ProbeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-		return
-	}
-
-	if req.URL == "" {
-		http.Error(w, `{"error":"url is required"}`, http.StatusBadRequest)
-		return
-	}
-
-	// Apply defaults.
+// applyProbeDefaults fills in default values for a ProbeRequest.
+func applyProbeDefaults(req *ProbeRequest) {
 	if req.ProbeURL == "" {
 		req.ProbeURL = probeDefaultProbeURL
 	}
@@ -138,20 +121,64 @@ func handleProbe(w http.ResponseWriter, r *http.Request, singBoxPath, xrayPath s
 	if req.Parallel > probeMaxParallel {
 		req.Parallel = probeMaxParallel
 	}
+}
 
-	fmt.Fprintf(os.Stderr, "Fetching subscription from %s ...\n", req.URL)
+// handleProbe serves POST /probe. If a run store is configured (--log), the
+// result (success or failure) is persisted for the panel to fetch later.
+func handleProbe(w http.ResponseWriter, r *http.Request, store *RunStore, singBoxPath, xrayPath string, verbose, keepLogs bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
 
-	subscriptionLines, err := FetchSubscription(req.URL)
+	var req ProbeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.URL == "" {
+		http.Error(w, `{"error":"url is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	applyProbeDefaults(&req)
+
+	startedAt := time.Now()
+	// r.Context() propagates client disconnects so a cancelled request aborts
+	// the probe instead of burning resources for the full duration.
+	resp, err := runProbeSubscription(r.Context(), req, singBoxPath, xrayPath, verbose, keepLogs)
+
+	if store != nil {
+		if serr := store.SaveRun(buildProbeRunRecord(req, startedAt, time.Now(), resp, err)); serr != nil {
+			fmt.Fprintf(os.Stderr, "probe: failed to save run: %v\n", serr)
+		}
+	}
+
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// runProbeSubscription is the shared probe pipeline (fetch → parse → run →
+// merge → summarize). It is used both by POST /probe and by the cron
+// scheduler; the caller supplies the context (request ctx for HTTP, a timeout
+// ctx for cron). req must already have defaults applied.
+func runProbeSubscription(ctx context.Context, req ProbeRequest, singBoxPath, xrayPath string, verbose, keepLogs bool) (ProbeResponse, error) {
+	fmt.Fprintf(os.Stderr, "Fetching subscription from %s ...\n", req.URL)
+
+	subscriptionLines, err := FetchSubscription(req.URL)
+	if err != nil {
+		return ProbeResponse{}, err
+	}
+
 	if len(subscriptionLines) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"error": "empty subscription"})
-		return
+		return ProbeResponse{}, fmt.Errorf("empty subscription")
 	}
 
 	var keys []*VlessKey
@@ -175,19 +202,14 @@ func handleProbe(w http.ResponseWriter, r *http.Request, singBoxPath, xrayPath s
 	}
 
 	if len(keys) == 0 && len(preResults) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"error": "no valid vless keys found"})
-		return
+		return ProbeResponse{}, fmt.Errorf("no valid vless keys found")
 	}
 
 	fmt.Fprintf(os.Stderr, "Probing %d vless keys (duration=%ds target=%dKb/s parallel=%d probe_url=%s)...\n",
 		len(keys), req.DurationSec, req.TargetKbps, req.Parallel, req.ProbeURL)
 
 	// Each key is probed sequentially inside its own goroutine; only
-	// probeMaxParallel keys run at the same time. r.Context() propagates
-	// client disconnects so a cancelled request aborts the probe instead of
-	// burning resources for the full duration.
-	ctx := r.Context()
+	// req.Parallel keys run at the same time.
 	results := make([]ProbeKeyResult, len(keys))
 	sem := make(chan struct{}, req.Parallel)
 	var wg sync.WaitGroup
@@ -237,8 +259,7 @@ func handleProbe(w http.ResponseWriter, r *http.Request, singBoxPath, xrayPath s
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	return resp, nil
 }
 
 // probeKey runs the full long-duration probe for a single key and returns its

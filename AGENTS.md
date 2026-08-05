@@ -1,12 +1,14 @@
 # AGENTS.md — онбординг для агентов
 
-**Что это:** Go-демон тестирования VLESS-ключей из VPN-подписок: быстрый тест (`/test`, `/test-single` — youtube+instagram через sing-box) и длительный нагрузочный тест «думскролл» (`/probe` — rate-limited скачивание файла с метриками и вердиктами OK/DEGRADED/FAILED). Для xhttp-ключей движок — xray, для остальных — sing-box.
+**Что это:** Go-демон тестирования VLESS-ключей из VPN-подписок: быстрый тест (`/test`, `/test-single` — youtube+instagram через sing-box) и длительный нагрузочный тест «думскролл» (`/probe` — rate-limited скачивание файла с метриками и вердиктами OK/DEGRADED/FAILED). Для xhttp-ключей движок — xray, для остальных — sing-box. По крону (каждые 4 часа) гоняет `/probe` по подписке-агрегатору панели и при `--log` накапливает результаты в bbolt-файле (`/runs` — GET-ручки с фильтром по диапазону дат).
 
 ## Файлы (1 строка на файл)
 
-- `main.go` — CLI-парсер, режим CLI/сервер, поиск бинарей sing-box/xray
-- `server.go` — HTTP-сервер: `/test`, `/test-single`, `/probe`
-- `probe.go` — `/probe`: цикл «думскролл», метрики, вердикты
+- `main.go` — CLI-парсер, режим CLI/сервер, поиск бинарей sing-box/xray; флаги `--log/--db/--cron-*`
+- `server.go` — HTTP-сервер: `/test`, `/test-single`, `/probe`, `GET /runs`, `GET /runs/{id}`
+- `probe.go` — `/probe`: цикл «думскролл», метрики, вердикты, общий `runProbeSubscription`
+- `scheduler.go` — крон 6 раз/сутки (4-часовая сетка), конфиг `--cron-config`/`--cron-*`
+- `store.go` — накопление результатов: bbolt (`RunRecord`), `SaveRun/ListRuns/GetRun` по диапазону дат
 - `tester.go` — движок: `startProxyEngine` (sing-box/xray), пул портов SOCKS5 10800–10900, curl-хелперы
 - `parser.go` — парсинг `vless://`
 - `config.go` / `xrayconfig.go` — генерация конфигов sing-box / xray
@@ -21,6 +23,8 @@ export PATH=$PATH:/usr/local/go/bin && go build -o vlesssubtest . && go vet .
 
 # запуск локально (8080 занят filebrowser'ом — только 8081+!)
 ./vlesssubtest --port=8081
+# локально с накоплением результатов в БД (файл вне контейнера)
+./vlesssubtest --port=8081 --log --db=/tmp/vlesssub/results.db
 
 # быстрый тест
 curl -X POST http://localhost:8081/test -H 'Content-Type: application/json' \
@@ -28,6 +32,8 @@ curl -X POST http://localhost:8081/test -H 'Content-Type: application/json' \
 # нагрузочный тест (пример из прода)
 curl -X POST http://localhost:7070/probe -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com/sub/ExampleClient","duration_sec":60,"target_kbps":4000,"parallel":1}'
+# история прогонов за даты (только при --log)
+curl 'http://localhost:7070/runs?from=2026-08-01&to=2026-08-06&detail=1'
 
 # docker-образ
 cd /home/klem/VlessSubTest && docker build -t vlesssubtest:latest .
@@ -54,3 +60,6 @@ cd /home/klem/VlessPanelWebApp && docker compose up -d vlesssubtest
 - Локально порт `8080` занят filebrowser'ом — тестировать на `8081+`.
 - Бинари `sing-box`/`xray` должны лежать рядом с бинарём vlesssubtest (не в PATH). В репо они есть; если нет — `docker cp vlesssubtest:/usr/local/bin/sing-box .` (и `xray`).
 - Go 1.21 (go.mod); локальный toolchain: `/usr/local/go/bin/go`. Подробности API/деплоя: `README.md`.
+- **`--log` включает накопление результатов** в bbolt (`--db`, дефолт `/data/results.db`). Без `--log` ручки `/runs` отвечают пустым списком. Файл БД лежит **вне контейнера** (volume `/data` в compose). Крон-конфиг `--cron-config=/data/config.json` — на хосте, отсутствует → дефолты.
+- **bbolt v1.3.8** — единственная внешняя зависимость (go 1.17, совместима с golang:1.21); в Dockerfile есть `go mod download`, `go.sum` обязателен при сборке.
+- Крон-прогоны и ручные `/test`/`/probe` с `--log` сохраняются в БД; `/test-single` — нет.

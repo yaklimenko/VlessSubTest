@@ -1,7 +1,7 @@
 FROM golang:1.21 AS builder
 WORKDIR /app
-COPY go.mod *.go ./
-RUN go build -o vlesssubtest .
+COPY go.mod go.sum *.go ./
+RUN go mod download && go build -o vlesssubtest .
 
 # Download Xray-core binary (used for xhttp transport tests)
 RUN apt-get update && apt-get install -y --no-install-recommends unzip wget ca-certificates && \

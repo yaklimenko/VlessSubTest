@@ -26,14 +26,57 @@ Go-демон для тестирования VLESS-ключей из VPN-под
 | `config.go` | Генерация JSON-конфига sing-box |
 | `xrayconfig.go` | Генерация JSON-конфига xray (для xhttp-ключей) |
 | `results.go` | Вывод результатов в CLI, загрузка подписки (base64) |
+| `store.go` | Накопление результатов: bbolt (`RunRecord`), выборки по диапазону дат |
+| `scheduler.go` | Крон: probe каждые 4 часа (6 раз/сутки), конфиг `--cron-config` |
 
 Поток данных: подписка (base64) → `FetchSubscription` → `ParseVlessURI` для каждой строки → для каждого ключа: выделить порт SOCKS5 (10800–10900) → старт движка (sing-box/xray) с конфигом в `/tmp/vlesssub/` → curl через `socks5h://127.0.0.1:<port>`.
 
 ---
 
+## Накопление результатов (--log)
+
+Демон может **накапливать** результаты прогонов в файле bbolt (встраиваемая KV-БД, файл вне контейнера). Включается флагом `--log`:
+
+```bash
+# локально
+./vlesssubtest --port=8081 --log --db=/tmp/vlesssub/results.db
+
+# в docker — файл монтируется volume'ом:
+# command: --port=7070 --log --db=/data/results.db --cron-config=/data/config.json
+# volumes:  ./data/vlesssubtest:/data
+```
+
+- Без `--log` ничего не пишется в БД (ручки `/runs` отвечают пустым списком).
+- С `--log` сохраняются **все** прогоны: крон, ручные `POST /test` и `POST /probe`. Ошибки (подписка недоступна, пустая подписка) тоже сохраняются — с полем `error`.
+- Каждый прогон — запись `RunRecord`: `id`, `kind` (`test`|`probe`), `subscription_url`, `started_at`/`finished_at`, `duration_sec`, счётчики `total/ok/degraded/failed`, `results[]` (per-key), при сбое — `error`. Ключ записи — UTC-время старта, поэтому выборки по диапазону дат работают по курсору без полного прохода.
+
+## Крон-расписание (--cron-*)
+
+В серверном режиме демон **сам** гоняет probe-тест по расписанию: каждые 4 часа (6 раз/сутки, сетка 00:00/04:00/08:00/12:00/16:00/20:00 UTC). Подписка по умолчанию — агрегатор панели:
+
+```
+https://example.com/sub/Example
+```
+
+Что тестировать — задаётся опциональным JSON-файлом `--cron-config` (перечитывается перед каждым запуском):
+
+```json
+{
+  "subscriptions": [
+    {"url": "https://example.com/sub/Example",
+     "duration_sec": 180, "target_kbps": 4000, "parallel": 1,
+     "probe_url": "https://203.0.113.5/speedtest/tcb.mp4"}
+  ]
+}
+```
+
+Дефолты можно переопределить флагами: `--cron-sub=URL` (заменяет весь список), `--cron-duration=N`, `--cron-target-kbps=N`, `--cron-parallel=N`, `--cron-probe-url=URL`. Файл отсутствует — тихо используются дефолты.
+
+---
+
 ## HTTP API
 
-Демон отвечает только на `POST`. Все ответы — JSON.
+Демон отвечает на `POST`-ручки тестов (`/test`, `/test-single`, `/probe`) и на `GET`-ручки истории (`/runs`, `/runs/{id}`). Все ответы — JSON.
 
 ### POST /test — быстрый тест всей подписки
 
@@ -134,6 +177,54 @@ curl -X POST http://localhost:7070/probe \
 
 ---
 
+### GET /runs — история прогонов с фильтром по диапазону дат
+
+Панель забирает накопленные результаты `GET`-запросом (появляются в БД при запуске с `--log`).
+
+```bash
+curl 'http://localhost:7070/runs?from=2026-08-01&to=2026-08-06&detail=1&limit=100'
+```
+
+| Параметр | Описание | Дефолт |
+|----------|----------|--------|
+| `from` | Начало диапазона (включительно). `YYYY-MM-DD` (локальный день, с 00:00) или RFC3339-время | безгранично |
+| `to` | Конец диапазона (включительно). `YYYY-MM-DD` (до конца дня) или RFC3339-время | безгранично |
+| `limit` | Макс. записей | `100` (кламп сверху `1000`) |
+| `detail` | `1` — вернуть per-key `results[]` каждого прогона; иначе только сводку | `0` |
+
+Ошибки валидации (`from > to`, неверный формат времени) → `400`. Прогоны возвращаются **новейшими первыми**.
+
+Ответ (без `detail=1` — `results` опускается):
+
+```json
+{
+  "total": 2,
+  "runs": [
+    {"id": "2026-08-05T21:56:30.720873228Z", "kind": "probe",
+     "subscription_url": "https://example.com/sub/Example",
+     "started_at": "2026-08-06T00:56:30.720873228+03:00", "finished_at": "2026-08-06T00:56:50.954197074+03:00",
+     "duration_sec": 20, "target_kbps": 500, "parallel": 1,
+     "total": 2, "ok": 1, "degraded": 0, "failed": 1},
+    {"id": "2026-08-05T21:56:29.228662040Z", "kind": "test",
+     "subscription_url": "https://example.com/sub/Example",
+     "started_at": "2026-08-06T00:56:29.22866204+03:00", "finished_at": "2026-08-06T00:56:30.705478603+03:00",
+     "duration_sec": 1, "total": 2, "ok": 1, "degraded": 0, "failed": 1}
+  ]
+}
+```
+
+### GET /runs/{id} — один прогон
+
+Полный прогон (включая `results[]`), где `{id}` — поле `id` из списка выше.
+
+```bash
+curl 'http://localhost:7070/runs/2026-08-05T21:56:30.720873228Z'
+```
+
+Ответ — один объект `RunRecord` (или `404`, если не найден). `GET /runs/{id}` при выключенном `--log` → `404`.
+
+---
+
 ## CLI-режим
 
 ```bash
@@ -148,6 +239,14 @@ curl -X POST http://localhost:7070/probe \
 | `--verbose` | Показывать stderr sing-box/xray при ошибках | `false` |
 | `--keep-logs` | Не удалять временные файлы в `/tmp/vlesssub` | `false` |
 | `--port=N` | Порт HTTP-сервера | `8080` |
+| `--log` | Накапливать результаты прогонов в bbolt | `false` |
+| `--db=PATH` | Путь к файлу БД результатов | `/data/results.db` |
+| `--cron-config=PATH` | JSON-конфиг крон-прогонов (опционально) | — |
+| `--cron-sub=URL` | URL подписки для крона (переопределяет конфиг) | агрегатор панели |
+| `--cron-duration=N` | Длительность probe на ключ для крона, сек | `180` |
+| `--cron-target-kbps=N` | Целевая скорость probe для крона | `4000` |
+| `--cron-parallel=N` | Параллельных ключей в кроне (1..2) | `1` |
+| `--cron-probe-url=URL` | Тестовый файл для крона | `https://203.0.113.5/speedtest/tcb.mp4` |
 | `--help`, `-h` | Справка | — |
 
 ```bash
@@ -199,20 +298,24 @@ Dockerfile: `golang:1.21` builder → `debian:bookworm-slim` runtime; sing-box 1
 
 ### Прод (docker)
 
-Прод-контейнер: имя `vlesssubtest`, порт `7070`, сеть `vlesspanel-net`, restart `unless-stopped`, образ `vlesssubtest:latest`.
+Прод-контейнер: имя `vlesssubtest`, порт `7070`, сеть `vlesspanel-net`, restart `unless-stopped`, образ `vlesssubtest:latest`. Стек с панелью описан в `/home/klem/VlessPanelWebApp/docker-compose.yml` (docker compose v2). Сервис `vlesssubtest` монтирует хост-каталог `./data/vlesssubtest` в `/data` (файл БД `results.db` лежит **вне контейнера**) и запускается с `--log`:
+
+```yaml
+vlesssubtest:
+  image: vlesssubtest:latest
+  command: --port=7070 --log --db=/data/results.db --cron-config=/data/config.json
+  volumes:
+    - ./data/vlesssubtest:/data
+```
 
 **Пересоздание контейнера после пересборки образа:**
 
 ```bash
-docker stop vlesssubtest && docker rm vlesssubtest
-docker run -d --name vlesssubtest \
-  -p 7070:7070 \
-  --network vlesspanel-net \
-  --restart unless-stopped \
-  vlesssubtest:latest --port=7070
+cd /home/klem/VlessSubTest && docker build -t vlesssubtest:latest .
+cd /home/klem/VlessPanelWebApp && docker compose up -d vlesssubtest
 ```
 
-⚠️ **docker compose здесь не используется** (плагина нет на хосте) — только `docker run`. В README проекта VlessPanelWebApp команда указана без `--restart`; вариант с `--restart unless-stopped` лучше — контейнер переживает перезагрузку хоста.
+⚠️ Опциональный крон-конфиг `/data/config.json` создаётся на **хосте** в `./data/vlesssubtest/` (см. раздел «Крон-расписание»). Если его нет — используются дефолты. Изменение файла подхватывается при следующем запуске крона.
 
 ### Интеграция с VlessPanelWebApp
 
@@ -238,7 +341,7 @@ docker run -d --name vlesssubtest \
 | `SING_BOX_START_FAILED: port not ready` | Движок не поднялся → запусти с `--verbose`/`--keep-logs`, посмотри `/tmp/vlesssub/sing-box-{port}.log` |
 | Порт занят при локальном запуске | `8080` на хосте занят filebrowser'ом → запускай на `8081+` |
 | В `/probe` скорость ~`target` — «всё сломалось»? | Нет, это норма: единицы — **Кбит/с**, `target=4000` = `--limit-rate 500K` = 500 КБ/с (4000 Кбит/с). Это сознательное решение |
-| «Где docker compose?» | Не используется — только `docker run` (см. раздел «Прод») |
+| «Где docker compose?» | Стек панели переведён на **docker compose v2** (`/home/klem/VlessPanelWebApp/docker-compose.yml`); см. раздел «Прод» |
 | `/probe` долго висит | Это нагрузочный тест (long-poll): `duration_sec` × число ключей. При разрыве клиента прогон прерывается через контекст запроса |
 | `FetchSubscription` завис | У `FetchSubscription` нет таймаута (известное ограничение) — висящий URL подписки заблокирует обработчик. Известно, не критично |
 
@@ -249,4 +352,30 @@ docker run -d --name vlesssubtest \
 - `findSingBox()`/`findXray()` не делают полноценный поиск по PATH — проверяют каталог исполняемого файла и CWD. Бинари должны лежать рядом с бинарём.
 - Пул портов 10800–10900 общий для `/test` и `/probe` (100 портов); несколько одновременных `/probe` с `parallel=2` могут его исчерпать. Для текущих нагрузок неактуально.
 - `probe_url` не валидируется по схеме (endpoint внутренний; при публичном доступе — добавить allowlist).
+- Крон-прогоны и ручные `/test`/`/probe` делят пул портов 10800–10900. Если крон стартовал с `parallel=2`, ручные запросы панели подождут свободного порта (`NO_PORT` — редко, для текущих нагрузок неактуально).
+- `bbolt` v1.3.8 добавлен как зависимость (совместима с `golang:1.21` из Dockerfile); `go.sum` обязателен для `go mod download` при сборке образа.
 - Онбординг для агентов: `AGENTS.md` в корне репозитория.
+
+---
+
+## Крон-расписание (системный cron)
+
+Встроенный планировщик демона уже гоняет probe каждые 4 часа (6 раз/сутки). Если нужно управлять расписанием **извне** (системный cron) — например, держать демон «спящим», а прогоны запускать по crontab, — добавь в crontab хоста задачу, которая дёргает ручку `POST /probe`:
+
+```cron
+# 6 раз в сутки: в 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
+0 0,4,8,12,16,20 * * * curl -s -X POST http://localhost:7070/probe -H 'Content-Type: application/json' \
+    -d '{"url":"https://example.com/sub/Example","duration_sec":180,"target_kbps":4000,"parallel":1}' >> /var/log/vlesssubtest-cron.log 2>&1
+```
+
+Эквивалентная запись через шаг: `0 */4 * * * curl ...` — тоже 6 раз в сутки.
+
+**Как создать:**
+
+```bash
+crontab -e
+# вставить строку выше, сохранить и выйти
+crontab -l   # проверить
+```
+
+⚠️ Прогоны по внешнему cron попадут в БД только при `--log`, как и встроенные. При использовании системного cron встроенный планировщик демона можно «отключить», не передавая флаги `--cron-*`/`--cron-config` — но учти: встроенный крон запускается всегда, а разница лишь в том, кто инициирует прогон. Если нужен строго внешний крон — обсуждаемо (флаг отключения планировщика не реализован).

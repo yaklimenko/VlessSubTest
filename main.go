@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +16,9 @@ func main() {
 	verbose := false
 	keepLogs := false
 	serverPort := 8080
+	logEnabled := false
+	dbPath := "/data/results.db"
+	cronOpts := CronOptions{}
 	hasURL := false
 
 	for _, arg := range os.Args[1:] {
@@ -28,6 +32,43 @@ func main() {
 			verbose = true
 		} else if arg == "--keep-logs" {
 			keepLogs = true
+		} else if arg == "--log" {
+			logEnabled = true
+		} else if strings.HasPrefix(arg, "--log=") {
+			if _, err := strconv.ParseBool(strings.TrimPrefix(arg, "--log=")); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --log value\n")
+				os.Exit(1)
+			}
+			logEnabled = strings.TrimPrefix(arg, "--log=") == "true"
+		} else if strings.HasPrefix(arg, "log=") {
+			if _, err := strconv.ParseBool(strings.TrimPrefix(arg, "log=")); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid log value\n")
+				os.Exit(1)
+			}
+			logEnabled = strings.TrimPrefix(arg, "log=") == "true"
+		} else if strings.HasPrefix(arg, "--db=") {
+			dbPath = strings.TrimPrefix(arg, "--db=")
+		} else if strings.HasPrefix(arg, "--cron-config=") {
+			cronOpts.ConfigPath = strings.TrimPrefix(arg, "--cron-config=")
+		} else if strings.HasPrefix(arg, "--cron-sub=") {
+			cronOpts.SubURL = strings.TrimPrefix(arg, "--cron-sub=")
+		} else if strings.HasPrefix(arg, "--cron-duration=") {
+			if _, err := fmt.Sscanf(strings.TrimPrefix(arg, "--cron-duration="), "%d", &cronOpts.Duration); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --cron-duration value\n")
+				os.Exit(1)
+			}
+		} else if strings.HasPrefix(arg, "--cron-target-kbps=") {
+			if _, err := fmt.Sscanf(strings.TrimPrefix(arg, "--cron-target-kbps="), "%d", &cronOpts.TargetKbps); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --cron-target-kbps value\n")
+				os.Exit(1)
+			}
+		} else if strings.HasPrefix(arg, "--cron-parallel=") {
+			if _, err := fmt.Sscanf(strings.TrimPrefix(arg, "--cron-parallel="), "%d", &cronOpts.Parallel); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: invalid --cron-parallel value\n")
+				os.Exit(1)
+			}
+		} else if strings.HasPrefix(arg, "--cron-probe-url=") {
+			cronOpts.ProbeURL = strings.TrimPrefix(arg, "--cron-probe-url=")
 		} else if strings.HasPrefix(arg, "--timeout=") {
 			if _, err := fmt.Sscanf(strings.TrimPrefix(arg, "--timeout="), "%d", &timeoutSec); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: invalid --timeout value\n")
@@ -58,7 +99,21 @@ func main() {
 	if hasURL {
 		runCLI(url, singBoxPath, xrayPath, timeoutSec, maxParallel, verbose, keepLogs)
 	} else {
-		startServer(singBoxPath, xrayPath, timeoutSec, maxParallel, verbose, keepLogs, serverPort)
+		var store *RunStore
+		if logEnabled {
+			var err error
+			store, err = OpenStore(dbPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: cannot open run database %s: %v\n", dbPath, err)
+				os.Exit(1)
+			}
+			defer store.Close()
+			fmt.Fprintf(os.Stderr, "Run logging enabled (db=%s)\n", dbPath)
+		} else {
+			fmt.Fprintf(os.Stderr, "Run logging disabled (pass --log to accumulate results)\n")
+		}
+		sched := NewScheduler(store, cronOpts, singBoxPath, xrayPath, verbose, keepLogs)
+		startServer(singBoxPath, xrayPath, timeoutSec, maxParallel, verbose, keepLogs, serverPort, store, sched)
 	}
 }
 
@@ -178,6 +233,14 @@ Options:
   --timeout=N        Test timeout in seconds (default: 10)
   --parallel=N       Max parallel tests (default: all)
   --port=N           HTTP server port (default: 8080)
+  --log              Accumulate run results in a bbolt database (default: off)
+  --db=PATH          Path to the run database (default: /data/results.db)
+  --cron-config=PATH Optional JSON config file for the scheduled probe runs
+  --cron-sub=URL     Scheduled subscription URL override (default: aggregator)
+  --cron-duration=N  Scheduled probe duration per key, seconds
+  --cron-target-kbps=N  Scheduled probe target speed, Kbit/s
+  --cron-parallel=N  Scheduled probe parallel keys (1..2)
+  --cron-probe-url=URL  Scheduled probe file URL
   --verbose          Show sing-box logs on error
   --keep-logs        Keep temporary files in /tmp/vlesssub
   --help, -h         Show this help
