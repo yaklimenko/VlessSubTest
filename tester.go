@@ -152,19 +152,24 @@ func runCurl(port int, targetURL string, timeoutSec int, parentCtx context.Conte
 	}
 }
 
-func curlTargetURL(key *VlessKey, singBoxPath, xrayPath string, targetURL string, timeoutSec int, verbose bool, keepLogs bool) (status, reason string) {
-	port, err := allocatePort()
-	if err != nil {
-		return "FAILED", fmt.Sprintf("NO_PORT: %v", err)
-	}
-	defer releasePort(port)
-
+// startProxyEngine starts sing-box (or xray-core for xhttp keys) with a local
+// SOCKS5 listener on the given port. The engine runs until ctx is cancelled
+// (exec.CommandContext kills the process when the context fires).
+//
+// On success it returns a cleanup function that kills the process and removes
+// temporary files; callers MUST invoke it (typically via defer). On failure it
+// removes any written temp files itself and returns the error.
+//
+// Both the short /test flow (curlTargetURL) and the long /probe flow reuse this
+// so the engine lifecycle (start, kill, file cleanup, port accounting) is
+// implemented exactly once.
+func startProxyEngine(key *VlessKey, singBoxPath, xrayPath string, port int, ctx context.Context, verbose, keepLogs bool) (func(), error) {
 	// Xray-core is used for transports sing-box does not support natively (xhttp).
 	useXray := key.Type == "xhttp"
 	enginePath := singBoxPath
 	if useXray {
 		if xrayPath == "" {
-			return "FAILED", "XRAY_NOT_FOUND: xray binary required for xhttp keys"
+			return nil, fmt.Errorf("XRAY_NOT_FOUND: xray binary required for xhttp keys")
 		}
 		enginePath = xrayPath
 	}
@@ -174,37 +179,24 @@ func curlTargetURL(key *VlessKey, singBoxPath, xrayPath string, targetURL string
 	if useXray {
 		cfg, err := GenerateXrayConfig(key, port)
 		if err != nil {
-			return "FAILED", fmt.Sprintf("CONFIG_ERROR: %v", err)
+			return nil, fmt.Errorf("CONFIG_ERROR: %v", err)
 		}
 		configPath, err = WriteXrayConfig(cfg)
 		if err != nil {
-			return "FAILED", fmt.Sprintf("CONFIG_WRITE_ERROR: %v", err)
+			return nil, fmt.Errorf("CONFIG_WRITE_ERROR: %v", err)
 		}
 	} else {
 		cfg, err := GenerateConfig(key, port)
 		if err != nil {
-			return "FAILED", fmt.Sprintf("CONFIG_ERROR: %v", err)
+			return nil, fmt.Errorf("CONFIG_ERROR: %v", err)
 		}
 		configPath, err = WriteConfig(cfg)
 		if err != nil {
-			return "FAILED", fmt.Sprintf("CONFIG_WRITE_ERROR: %v", err)
+			return nil, fmt.Errorf("CONFIG_WRITE_ERROR: %v", err)
 		}
 		dataDir = fmt.Sprintf("/tmp/vlesssub/data-%d", port)
 		os.MkdirAll(dataDir, 0755)
 	}
-
-	cleanup := func() {
-		if !keepLogs {
-			os.Remove(configPath)
-			os.RemoveAll(dataDir)
-			logFile := fmt.Sprintf("/tmp/vlesssub/sing-box-%d.log", port)
-			os.Remove(logFile)
-		}
-	}
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec+5)*time.Second)
-	defer cancel()
 
 	var args []string
 	if useXray {
@@ -221,15 +213,42 @@ func curlTargetURL(key *VlessKey, singBoxPath, xrayPath string, targetURL string
 	}
 
 	if err := cmd.Start(); err != nil {
-		return "FAILED", fmt.Sprintf("SING_BOX_START_FAILED: %v", err)
+		os.Remove(configPath)
+		os.RemoveAll(dataDir)
+		return nil, fmt.Errorf("SING_BOX_START_FAILED: %v", err)
 	}
 
-	defer func() {
+	cleanup := func() {
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
 		time.Sleep(200 * time.Millisecond)
-	}()
+		if !keepLogs {
+			os.Remove(configPath)
+			os.RemoveAll(dataDir)
+			logFile := fmt.Sprintf("/tmp/vlesssub/sing-box-%d.log", port)
+			os.Remove(logFile)
+		}
+	}
+
+	return cleanup, nil
+}
+
+func curlTargetURL(key *VlessKey, singBoxPath, xrayPath string, targetURL string, timeoutSec int, verbose bool, keepLogs bool) (status, reason string) {
+	port, err := allocatePort()
+	if err != nil {
+		return "FAILED", fmt.Sprintf("NO_PORT: %v", err)
+	}
+	defer releasePort(port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec+5)*time.Second)
+	defer cancel()
+
+	cleanup, err := startProxyEngine(key, singBoxPath, xrayPath, port, ctx, verbose, keepLogs)
+	if err != nil {
+		return "FAILED", err.Error()
+	}
+	defer cleanup()
 
 	if !waitForPort(port, timeoutSec) {
 		return "FAILED", "SING_BOX_START_FAILED: port not ready"

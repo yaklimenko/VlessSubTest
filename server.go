@@ -149,6 +149,10 @@ func startServer(singBoxPath, xrayPath string, timeoutSec, maxParallel int, verb
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
+		handleProbe(w, r, singBoxPath, xrayPath, verbose, keepLogs)
+	})
+
 	mux.HandleFunc("/test-single", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
