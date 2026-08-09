@@ -1,5 +1,7 @@
 FROM golang:1.21 AS builder
 WORKDIR /app
+# РФ-зеркало: deb.debian.org из России почти не качается
+RUN sed -i 's|http://deb.debian.org/debian|http://mirror.yandex.ru/debian|g' /etc/apt/sources.list.d/debian.sources
 COPY go.mod go.sum *.go ./
 RUN go mod download && go build -o vlesssubtest .
 
@@ -12,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends unzip wget ca-c
     rm -rf /tmp/xray.zip /tmp/xray
 
 FROM debian:bookworm-slim AS runtime
+# РФ-зеркало: deb.debian.org из России почти не качается
+RUN sed -i 's|http://deb.debian.org/debian|http://mirror.yandex.ru/debian|g' /etc/apt/sources.list.d/debian.sources
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
 ARG SING_BOX_VERSION=1.13.13
