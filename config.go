@@ -75,7 +75,6 @@ type TransportConfig struct {
 	Path                 string              `json:"path,omitempty"`
 	Headers              map[string][]string `json:"headers,omitempty"`
 	ServiceName          string              `json:"service_name,omitempty"`
-	Host                 string              `json:"host,omitempty"`
 	IdleTimeout          string              `json:"idle_timeout,omitempty"`
 	PingTimeout          string              `json:"ping_timeout,omitempty"`
 	PermitWithoutStream  bool                `json:"permit_without_stream,omitempty"`
@@ -139,9 +138,16 @@ func GenerateConfig(key *VlessKey, port int) (*SingBoxConfig, error) {
 			Reality: realityCfg,
 		}
 	} else if key.Security == "tls" {
+		serverName := key.ServerName
+		// Some panels issue certs for the server IP only and omit sni in the
+		// link (host= is an HTTP header, not TLS SNI). Fall back to the server
+		// address so TLS verification succeeds without allowInsecure.
+		if serverName == "" && key.Address != "" {
+			serverName = key.Address
+		}
 		outbound.TLS = &TLSConfig{
 			Enabled:    true,
-			ServerName: key.ServerName,
+			ServerName: serverName,
 			Insecure:   key.AllowInsecure == "1",
 			UTLS: &UTLSConfig{
 				Enabled:     true,
@@ -175,13 +181,13 @@ func GenerateConfig(key *VlessKey, port int) (*SingBoxConfig, error) {
 		} else if key.Type == "xhttp" && key.SpiderX != "" {
 			transport.Path = key.SpiderX
 		}
+		// NOTE: sing-box has no top-level "host" field in transport config —
+		// Host header goes into headers only. Setting both breaks config decode.
 		if key.Host != "" {
-			transport.Host = key.Host
 			transport.Headers = map[string][]string{
 				"Host": {key.Host},
 			}
 		} else if key.Type == "xhttp" && key.ServerName != "" {
-			transport.Host = key.ServerName
 			transport.Headers = map[string][]string{
 				"Host": {key.ServerName},
 			}
